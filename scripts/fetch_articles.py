@@ -60,6 +60,7 @@ def get(url, **kw):
 
 # --- text cleaning ---------------------------------------------------------
 BLOCK_RE = re.compile(r"</?(p|div|h[1-6]|li|blockquote|br|tr|figure|figcaption|section|article)[^>]*>", re.I)
+CAPTION_RE = re.compile(r"(used with permission|photo (via|by|courtesy)|image (via|by|courtesy)|screenshot (from|of)|credit:|getty images|\(ap photo|via wikimedia|cc by)", re.I)
 JUNK_RE = re.compile(r"^(read more|related|this article (is|was) republished|copyright|share this|follow us|image:|photo:|subscribe|sign up|click here|the post .* appeared first)", re.I)
 
 
@@ -76,7 +77,10 @@ def clean_paragraphs(chunks):
     out = []
     for p in chunks:
         p = re.sub(r"\s+", " ", p).strip()
-        if len(p) < 40 or JUNK_RE.match(p) or p.count(" ") < 6:
+        p = re.sub(r"\s*\([^()]*[ˈˌəʊɪʃʒθðŋː][^()]*\)", "", p)  # IPA pronunciations
+        p = re.sub(r"\s*\[[^\]]*[ˈˌəʊɪʃʒθðŋː][^\]]*\]\s*,?", " ", p).replace("( ", "(").replace(" ,", ",")
+        p = re.sub(r"\(\s*[;,]?\s*\)", "", p)
+        if len(p) < 40 or JUNK_RE.match(p) or p.count(" ") < 6 or (CAPTION_RE.search(p) and len(p) < 300):
             continue
         if not re.search(r"[.!?\"”’)]$", p):  # captions, headings, credits
             continue
@@ -241,25 +245,26 @@ def wikipedia(date, seen):
             if art:
                 out.append(art)
                 break
-    # On this day -> history
-    events = feed.get("onthisday", [])
+    # On this day -> history: prefer real historical events (battles, treaties, disasters…)
+    EVENT = re.compile(r"\b(battle|war|treaty|revolution|siege|uprising|rebellion|massacre|earthquake|disaster|expedition|assassination|coup|independence|empire|dynasty|crusade|invasion|conference|election|explosion|sinking|discovery|incident|attack|campaign|agreement|accord|referendum)\b", re.I)
+    cands = []
+    for ev in feed.get("onthisday", []):
+        for page in ev.get("pages", [])[:3]:
+            t = page.get("normalizedtitle") or page.get("title", "").replace("_", " ")
+            desc = page.get("description") or ""
+            score = (2 if EVENT.search(t) else 0) + (1 if EVENT.search(desc) else 0) + (1 if re.search(r"\b1?\d{3}\b", t) else 0)
+            if score and wiki_url(t) not in seen:
+                cands.append((score, -abs(int(ev.get("year", 1900)) - 1700) / 1000, t, ev))
     hist = 0
-    for ev in events:
+    for score, _, t, ev in sorted(cands, key=lambda c: (-c[0], c[1])):
         if hist >= 2:
             break
-        for page in ev.get("pages", [])[:2]:
-            t = page.get("normalizedtitle") or page.get("title", "").replace("_", " ")
-            desc = (page.get("description") or "").lower()
-            if any(k in desc for k in ("country", "city", "capital", "born", "politician", "actor", "singer")):
-                continue
-            if wiki_url(t) in seen:
-                continue
-            art = make_article("Wikipedia · On this day", "history", t, wiki_url(t), lic, wiki_extract(t),
-                               {"summary": f"{ev.get('year')}: {ev.get('text', '')}"})
-            if art:
-                out.append(art)
-                hist += 1
-                break
+        art = make_article("Wikipedia · On this day", "history", t, wiki_url(t), lic, wiki_extract(t),
+                           {"summary": f"On this day in {ev.get('year')}: {re.sub(r'<[^>]+>', '', ev.get('text', ''))}"})
+        if art:
+            out.append(art)
+            seen.add(wiki_url(t))
+            hist += 1
     # Today's featured article
     tfa = feed.get("tfa")
     if tfa:
@@ -302,7 +307,10 @@ def feed_articles(seen):
                 except Exception as ex:  # noqa
                     log("  trafilatura failed", ex)
             category = cat
-            if cat != "history" and HISTORY_WORDS.search(e.get("title", "")):
+            text_head = e.get("title", "") + " " + e.get("summary", "")[:300]
+            if cat == "history" and not HISTORY_WORDS.search(text_head):
+                category = "featured"   # arts & culture
+            elif cat != "history" and HISTORY_WORDS.search(e.get("title", "")):
                 category = "history"
             art = make_article(source, category, e.get("title", "Untitled"), link, lic, paras,
                                {"summary": re.sub(r"<[^>]+>", "", html.unescape(e.get("summary", "")))[:300].strip(),
@@ -330,7 +338,7 @@ def load_seen():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--date", default=dt.datetime.utcnow().strftime("%Y-%m-%d"))
+    ap.add_argument("--date", default=dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d"))
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
     date = dt.date.fromisoformat(args.date)
@@ -361,7 +369,7 @@ def main():
         if not arts:
             log("No articles fetched — not writing a file.")
             return 1
-        json.dump({"date": str(date), "generated": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        json.dump({"date": str(date), "generated": dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds") + "Z",
                    "articles": arts}, open(path, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
         log(f"Wrote {len(arts)} articles to {path}")
     # prune + index
@@ -377,7 +385,7 @@ def main():
                           "titles": [[a["id"], a["title"], a["category"], a["level"]] for a in arts]})
         except Exception:
             pass
-    json.dump({"updated": dt.datetime.utcnow().isoformat(timespec="seconds") + "Z", "days": index},
+    json.dump({"updated": dt.datetime.now(dt.timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds") + "Z", "days": index},
               open(os.path.join(DATA, "index.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=0)
     return 0
 
