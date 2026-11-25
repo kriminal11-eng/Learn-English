@@ -10,7 +10,7 @@ on:
         type: boolean
         default: false
   push:
-    branches: [main, "claude/**"]
+    branches: [main]
     paths: ["scripts/**", ".github/workflows/daily.yml", "index.html", "js/**", "css/**"]
 
 permissions:
