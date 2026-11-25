@@ -10,7 +10,7 @@ on:
         type: boolean
         default: false
   push:
-    branches: [main, "claude/**"]
+    branches: [main]
     paths: ["scripts/**", ".github/workflows/daily.yml", "index.html", "js/**", "css/**"]
 
 permissions:
@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.first_try.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -61,5 +61,12 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: .
+      - id: first_try
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+      # GitHub's artifact API is sometimes briefly unavailable: wait and try once more.
+      - if: steps.first_try.outcome == 'failure'
+        run: sleep 60
       - id: deployment
+        if: steps.first_try.outcome == 'failure'
         uses: actions/deploy-pages@v4
